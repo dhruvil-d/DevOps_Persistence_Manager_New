@@ -264,58 +264,47 @@ kubectl logs -l app=pv-manager-backup -n pv-manager
 
 ## CI/CD Integration
 
-All 4 platforms call the same `pv_manager.sh` commands and follow the same pattern:
-
-```
-Pre-deploy backup → Deploy → Wait for rollout → Status check → Monitor → [Restore on failure]
-```
+All pipelines are designed to ensure the reliability of the Persistent Volume Manager before and during deployment.
 
 ### Required Secrets / Environment Variables
 
 | Variable | All Platforms | Description |
 |----------|--------------|-------------|
-| `KUBECONFIG_BASE64` | ✅ | Base64-encoded kubeconfig |
+| `KUBECONFIG_BASE64` | ✅ | Base64-encoded kubeconfig for deployment jobs |
 
 Generate with:
 ```bash
 cat ~/.kube/config | base64 | tr -d '\n'
 ```
 
-### GitHub Actions
+### GitHub Actions (Continuous Integration)
 
-File: `ci-cd/github-actions/pv-manager.yml`
+File: `.github/workflows/pv-manager.yml`
 
-- 4 separate jobs: `pre-deploy-backup`, `deploy`, `monitor`, `emergency-restore`
-- Backup uploaded as workflow artifact (7-day retention)
-- `emergency-restore` triggered by `if: failure()`
-- Manual trigger via `workflow_dispatch` with action selection
+The GitHub Actions workflow runs on every push and pull request to the `main` branch. It performs **dry-run validation** and testing without requiring a live Kubernetes cluster connection:
 
-### Jenkins CI/CD Automation
+1. **Validate K8s Manifests:** Uses Python `yaml.safe_load_all()` to statically validate the syntax of all YAML files in `k8s/` and checks that `pv_manager.sh` has valid Bash syntax.
+2. **Build Docker Image:** Builds the `pv-demo-app:latest` Docker image.
+3. **Smoke Test:** Runs the container locally on the GitHub runner and verifies the web UI and API endpoints are responding correctly.
 
-File: `ci-cd/jenkins/Jenkinsfile`
+### Jenkins (Continuous Deployment)
 
-This project is fully integrated with Jenkins. The provided `Jenkinsfile` uses a declarative pipeline to completely automate the DevOps workflow.
+File: `Jenkinsfile` (project root)
 
-#### Pipeline Workflow
-Developer pushes code → **Jenkins pipeline starts** → Checkout SCM → **Persistent Volume Backup** → **Docker Image Build** → **Kubernetes Deployment** → **Post-Deploy Status Check** → **Storage Monitoring** → *(If any step fails, Jenkins automatically aborts the pipeline and explicitly triggers a pv_manager.sh restore using the backup taken 10 seconds prior)*.
+The Jenkins pipeline automates the full deployment and incorporates our PV Manager script for safety:
 
-#### Jenkins Node Requirements
-To successfully run this pipeline, the Jenkins Agent/Node executing the job requires:
-1. `git` (to checkout the source code)
-2. `docker` (to build the application image)
-3. `kubectl` (configured to access your Kubernetes cluster)
-4. Bash environment (the pipeline explicitly executes `./scripts/pv_manager.sh`)
+1. **Pre-Deploy Backup:** Runs `./scripts/pv_manager.sh backup` to safely archive the existing persistent volume data.
+2. **Build Docker Image:** Builds the application image.
+3. **Kubernetes Deployment:** Applies all manifests in the `k8s/` directory.
+4. **Post-Deploy Status:** Checks the binding status of PVs and PVCs.
+5. **Monitor:** Prints storage and resource usage metrics.
+6. **Auto-Restore on Failure:** A `post { failure { ... } }` block catches any deployment failures (e.g., ImagePullBackOff or CrashLoopBackOff) and automatically runs `./scripts/pv_manager.sh restore` using the backup taken in step 1, guaranteeing zero data loss.
 
-#### Jenkins Setup & Configuration
-1. **Credentials**: You must create a Jenkins **Secret file** credential with the ID `kubeconfig`. Upload your valid `~/.kube/config` file (this allows the Jenkins pipeline to inject it into the environment).
-2. **Webhooks Setup**: In your GitHub/GitLab repository settings, point the webhook to `http://<JENKINS_URL>/github-webhook/` to trigger builds automatically on `git push`.
-3. **Pipeline Configuration**:
-   - `agent any` – The pipeline can run on any available Jenkins node.
-   - `disableConcurrentBuilds()` – This is explicitly enabled to prevent parallel pipelines from corrupting the Kubernetes state or the PV Manager lock file.
-
-#### The Auto-Restore Mechanism
-The pipeline uses a `post { failure { ... } }` handler.
-If the `k8s/deployment.yaml` rollout fails (e.g., ImagePullBackOff, CrashLoopBackOff), Jenkins immediately traps the failure, grabs the filename of the `.tar.gz` backup it created in Stage 2, and runs `./scripts/pv_manager.sh restore <backup_file>`. This guarantees your persistent data is safe even if a deployment corrupts the cluster state.
+#### Jenkins Setup Instructions (Local)
+1. Ensure Jenkins has Docker, Git, and `kubectl` installed.
+2. Create a **Secret file** credential in Jenkins with the ID `kubeconfig` and upload your `~/.kube/config`.
+3. Create a new **Pipeline** job and set the definition to **Pipeline script from SCM**.
+4. Point it to this Git repository with the Script Path set to `Jenkinsfile`.
 
 ### GitLab CI/CD
 
