@@ -42,7 +42,7 @@ jobs:
           echo "═══════════════════════════════════════════════"
           FAIL=0
           for f in k8s/*.yaml; do
-            if python3 -c "import yaml; yaml.safe_load(open('$f'))" 2>/dev/null; then
+            if python3 -c "import yaml; list(yaml.safe_load_all(open('$f')))" 2>/dev/null; then
               echo "✔ $f — valid YAML"
             else
               echo "✘ $f — INVALID YAML"
