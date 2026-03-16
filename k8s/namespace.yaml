@@ -1,0 +1,13 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/namespace.yaml
+# Creates the `pv-manager` namespace that isolates all project
+# resources from the default namespace.
+# ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pv-manager
+  labels:
+    app.kubernetes.io/name: pv-manager
+    app.kubernetes.io/managed-by: kubectl
+    environment: dev

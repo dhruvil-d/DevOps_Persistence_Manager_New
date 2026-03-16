@@ -1,0 +1,183 @@
+# =============================================================================
+# GitHub Actions – PV Manager Workflow
+# =============================================================================
+# Triggers on push/PR to main branch and can also be manually triggered.
+# Pipeline: Pre-deploy backup → Deploy → Verify → Rollback on failure
+# =============================================================================
+name: PV Manager – Backup & Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:       # Manual trigger with optional inputs
+    inputs:
+      action:
+        description: "PV Manager action to run"
+        required: false
+        default: "backup"
+        type: choice
+        options: [ backup, restore, status, list, monitor ]
+
+env:
+  PV_NAMESPACE: pv-manager
+  PV_BACKUP_DIR: ./backups
+  KUBECTL_TIMEOUT: 30s
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # JOB 1: Pre-deployment backup
+  # ──────────────────────────────────────────────────────────────────
+  pre-deploy-backup:
+    name: Pre-Deploy Backup
+    runs-on: ubuntu-latest
+    outputs:
+      backup_file: ${{ steps.backup.outputs.backup_file }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Verify cluster connectivity
+        run: kubectl cluster-info
+
+      - name: Check PV Manager status
+        run: |
+          chmod +x scripts/pv_manager.sh
+          ./scripts/pv_manager.sh status
+
+      - name: Run pre-deployment backup
+        id: backup
+        run: |
+          chmod +x scripts/pv_manager.sh
+          ./scripts/pv_manager.sh backup
+          # Capture the latest backup file for downstream jobs
+          LATEST=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1)
+          echo "backup_file=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Latest backup: $LATEST"
+
+      - name: Upload backup as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pv-backup-${{ github.run_id }}
+          path: backups/backup_*.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────
+  # JOB 2: Deploy Kubernetes manifests
+  # ──────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: pre-deploy-backup
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/rbac.yaml
+          kubectl apply -f k8s/pv.yaml
+          kubectl apply -f k8s/pvc.yaml
+          kubectl apply -f k8s/deployment.yaml
+
+      - name: Wait for deployment rollout
+        run: |
+          kubectl rollout status deployment/pv-demo-app \
+            -n pv-manager \
+            --timeout=120s || {
+              echo "Deployment rollout failed. Check pod events:"
+              kubectl describe pods -n pv-manager -l app=pv-demo-app
+              exit 1
+            }
+
+      - name: Post-deploy status check
+        run: |
+          chmod +x scripts/pv_manager.sh
+          ./scripts/pv_manager.sh status
+
+  # ──────────────────────────────────────────────────────────────────
+  # JOB 3: Monitor storage after deployment
+  # ──────────────────────────────────────────────────────────────────
+  monitor:
+    name: Post-Deploy Monitor
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+
+      - name: Run storage monitor
+        run: |
+          chmod +x scripts/pv_manager.sh
+          ./scripts/pv_manager.sh monitor
+
+  # ──────────────────────────────────────────────────────────────────
+  # JOB 4: Emergency restore on pipeline failure
+  # ──────────────────────────────────────────────────────────────────
+  emergency-restore:
+    name: Emergency Restore (on failure)
+    runs-on: ubuntu-latest
+    needs: [ pre-deploy-backup, deploy ]
+    if: failure() && needs.pre-deploy-backup.outputs.backup_file != ''
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > ~/.kube/config
+
+      - name: Download backup artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pv-backup-${{ github.run_id }}
+          path: backups/
+
+      - name: Restore from pre-deploy backup
+        run: |
+          chmod +x scripts/pv_manager.sh
+          BACKUP_FILE="${{ needs.pre-deploy-backup.outputs.backup_file }}"
+          echo "Restoring from: $BACKUP_FILE"
+          ./scripts/pv_manager.sh restore "$BACKUP_FILE"
+
+      - name: Verify restoration
+        run: |
+          ./scripts/pv_manager.sh status

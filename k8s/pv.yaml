@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/pv.yaml
+# PersistentVolume backed by a hostPath directory on the Minikube node.
+# For cloud deployments replace `hostPath` with the appropriate
+# provisioner (e.g. AWS EBS, GCP PD, Azure Disk).
+# ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-manager-pv
+  labels:
+    app.kubernetes.io/name: pv-manager
+    type: local
+spec:
+  storageClassName: standard
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain   # Keep data even after PVC release
+  hostPath:
+    path: /mnt/pv-data                    # Minikube node path
+    type: DirectoryOrCreate               # Auto-create if missing

@@ -1,0 +1,110 @@
+# =============================================================================
+# .gitlab-ci.yml – GitLab CI/CD Pipeline – PV Manager
+# =============================================================================
+# Pipeline: Pre-deploy backup → Deploy → Verify → Restore on failure
+# Backup archives are stored as GitLab CI artifacts for 7 days.
+# =============================================================================
+
+image: bitnami/kubectl:latest
+
+variables:
+  PV_NAMESPACE: "pv-manager"
+  PV_BACKUP_DIR: "$CI_PROJECT_DIR/backups"
+  KUBECTL_TIMEOUT: "30s"
+
+# ── Global before_script: configure kubectl ──────────────────────────────────
+before_script:
+  - mkdir -p ~/.kube
+  - echo "$KUBECONFIG_BASE64" | base64 -d > ~/.kube/config
+  - chmod 600 ~/.kube/config
+  - chmod +x scripts/pv_manager.sh
+  - mkdir -p backups
+  - kubectl cluster-info
+
+# ── Pipeline stages ──────────────────────────────────────────────────────────
+stages:
+  - pre-deploy-backup
+  - deploy
+  - verify
+  - monitor
+
+# ── Stage 1: Pre-deployment backup ──────────────────────────────────────────
+pre_deploy_backup:
+  stage: pre-deploy-backup
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"       # manual trigger
+  script:
+    - echo "═══ Pre-Deployment Backup ═══"
+    - ./scripts/pv_manager.sh status
+    - ./scripts/pv_manager.sh backup
+    - |
+      BACKUP_FILE=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1)
+      echo "BACKUP_FILE=$BACKUP_FILE" >> backup.env
+      echo "Backup created: $BACKUP_FILE"
+  artifacts:
+    paths:
+      - backups/backup_*.tar.gz
+      - backup.env
+    expire_in: 7 days
+    when: always
+    reports:
+      dotenv: backup.env
+
+# ── Stage 2: Deploy ──────────────────────────────────────────────────────────
+deploy_k8s:
+  stage: deploy
+  needs:
+    - job: pre_deploy_backup
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - echo "═══ Deploying Kubernetes Manifests ═══"
+    - kubectl apply -f k8s/namespace.yaml
+    - kubectl apply -f k8s/rbac.yaml
+    - kubectl apply -f k8s/pv.yaml
+    - kubectl apply -f k8s/pvc.yaml
+    - kubectl apply -f k8s/deployment.yaml
+    - |
+      kubectl rollout status deployment/pv-demo-app \
+        -n "$PV_NAMESPACE" \
+        --timeout=120s || {
+          echo "Rollout failed – initiating emergency restore..."
+          ./scripts/pv_manager.sh restore "$BACKUP_FILE"
+          exit 1
+        }
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" == "failed" ] && [ -n "$BACKUP_FILE" ]; then
+        echo "Job failed. Restoring from backup: $BACKUP_FILE"
+        chmod +x scripts/pv_manager.sh
+        ./scripts/pv_manager.sh restore "$BACKUP_FILE"
+      fi
+
+# ── Stage 3: Post-deploy verification ────────────────────────────────────────
+verify:
+  stage: verify
+  needs: [ deploy_k8s ]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - echo "═══ Post-Deploy Verification ═══"
+    - ./scripts/pv_manager.sh status
+    - ./scripts/pv_manager.sh list
+
+# ── Stage 4: Monitor storage ─────────────────────────────────────────────────
+monitor:
+  stage: monitor
+  needs: [ verify ]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - echo "═══ Storage & Resource Monitoring ═══"
+    - ./scripts/pv_manager.sh monitor
+    - ./scripts/pv_manager.sh schedule on
+  allow_failure: true    # Don't block pipeline if metrics-server unavailable

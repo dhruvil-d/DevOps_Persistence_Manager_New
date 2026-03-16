@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PV Storage UI</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --text: #f8fafc;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: var(--surface);
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            margin-bottom: 1.5rem;
+        }
+        input[type="text"] {
+            width: calc(100% - 100px);
+            padding: 0.75rem;
+            border-radius: 4px;
+            border: 1px solid #334155;
+            background: #0f172a;
+            color: white;
+            font-size: 1rem;
+        }
+        button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+        button:hover { background-color: #2563eb; }
+        .message-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .message-item {
+            padding: 1rem;
+            border-bottom: 1px solid #334155;
+            word-break: break-word;
+        }
+        .message-item:last-child { border-bottom: none; }
+        .timestamp {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            display: inline-block;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Kubernetes PV Storage Demo</h1>
+        <p>This data is written to the <code>/data</code> Persistent Volume. It will survive pod restarts!</p>
+    </div>
+
+    <div class="card">
+        <form id="messageForm" style="display: flex; gap: 10px;">
+            <input type="text" id="messageInput" placeholder="Enter a random message..." required autocomplete="off">
+            <button type="submit">Save</button>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2 style="margin-top: 0; margin-bottom: 1rem;">Stored Messages</h2>
+        <ul id="messagesList" class="message-list">
+            <li class="message-item" style="text-align: center; color: #94a3b8;">Loading messages...</li>
+        </ul>
+    </div>
+
+    <script>
+        const API_URL = '/messages';
+
+        async function fetchMessages() {
+            try {
+                const response = await fetch(API_URL);
+                const messages = await response.json();
+                const list = document.getElementById('messagesList');
+                
+                if (messages.length === 0) {
+                    list.innerHTML = '<li class="message-item" style="text-align: center; color: #94a3b8;">No messages yet.</li>';
+                    return;
+                }
+
+                list.innerHTML = messages.map(msg => {
+                    // Extract timestamp if it exists in [YYYY-MM-DD HH:MM:SS] format
+                    const match = msg.match(/^\[(.*?)\] (.*)$/);
+                    if (match) {
+                        return `<li class="message-item"><span class="timestamp">[${match[1]}]</span> ${match[2]}</li>`;
+                    }
+                    return `<li class="message-item">${msg}</li>`;
+                }).join('');
+                
+                // Auto scroll to bottom
+                list.scrollTop = list.scrollHeight;
+            } catch (err) {
+                console.error('Failed to fetch messages:', err);
+            }
+        }
+
+        document.getElementById('messageForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('messageInput');
+            const text = input.value;
+            
+            if (!text.trim()) return;
+
+            try {
+                await fetch(API_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text })
+                });
+                
+                input.value = '';
+                await fetchMessages();
+            } catch (err) {
+                console.error('Failed to save message:', err);
+                alert('Failed to save message. See console.');
+            }
+        });
+
+        // Initial load
+        fetchMessages();
+        
+        // Refresh every 5 seconds just in case
+        setInterval(fetchMessages, 5000);
+    </script>
+</body>
+</html>

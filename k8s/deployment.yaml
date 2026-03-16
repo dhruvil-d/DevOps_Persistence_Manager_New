@@ -1,0 +1,95 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/deployment.yaml
+# Deploys the pv-demo-app with the PVC mounted at /data.
+# Namespace: pv-manager
+# ─────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pv-demo-app
+  namespace: pv-manager
+  labels:
+    app: pv-demo-app
+    app.kubernetes.io/name: pv-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pv-demo-app
+  strategy:
+    type: Recreate          # Ensures only one pod writes to ReadWriteOnce PVC at a time
+  template:
+    metadata:
+      labels:
+        app: pv-demo-app
+    spec:
+      serviceAccountName: pv-manager-sa
+
+      # ── Security context ─────────────────────────────────────────
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001       # Ensures /data is writable by appuser
+
+      # ── Init container: fix /data permissions for non-root user ──────
+      initContainers:
+        - name: fix-data-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 1001:1001 /data && chmod 755 /data"]
+          volumeMounts:
+            - name: pv-data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0    # Runs as root to perform chown
+
+      containers:
+        - name: pv-demo-app
+          image: pv-demo-app:latest
+          imagePullPolicy: IfNotPresent   # Use local image in Minikube
+          securityContext:
+            runAsNonRoot: true
+
+          # ── Resource limits ──────────────────────────────────────
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          ports:
+            - containerPort: 5000
+              name: http
+
+          # ── Persistent volume mount ──────────────────────────────
+          volumeMounts:
+            - name: pv-data
+              mountPath: /data
+
+          # ── Health probes ────────────────────────────────────────
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          # ── Environment ──────────────────────────────────────────
+          env:
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+      # ── Volume definition ────────────────────────────────────────
+      volumes:
+        - name: pv-data
+          persistentVolumeClaim:
+            claimName: pv-manager-pvc

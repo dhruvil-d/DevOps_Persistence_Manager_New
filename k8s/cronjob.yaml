@@ -1,0 +1,127 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/cronjob.yaml
+# Scheduled backup job that runs every hour.
+#
+# HOW IT WORKS:
+#   A job container (bitnami/kubectl) is spawned with kubectl
+#   pre-installed and the pv-manager-sa ServiceAccount baked in.
+#   It execs into the running pv-demo-app pod and triggers the
+#   backup logic by calling `kubectl cp` to pull /data out and
+#   compress it into a timestamped archive.
+#
+# Namespace: pv-manager
+# ─────────────────────────────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pv-manager-backup-cron
+  namespace: pv-manager
+  labels:
+    app.kubernetes.io/name: pv-manager
+    component: backup-scheduler
+spec:
+  # Run every hour at minute 0
+  schedule: "0 * * * *"
+
+  # Prevent overlapping runs (if previous job still running, skip)
+  concurrencyPolicy: Forbid
+
+  # Keep last 3 successful and 1 failed job for debugging
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+  # Mark job as failed if not started within 5 minutes of schedule
+  startingDeadlineSeconds: 300
+
+  jobTemplate:
+    spec:
+      # Retry once on failure before marking as failed
+      backoffLimit: 1
+
+      # Kill job after 10 minutes to prevent runaway processes
+      activeDeadlineSeconds: 600
+
+      template:
+        metadata:
+          labels:
+            app: pv-manager-backup
+        spec:
+          serviceAccountName: pv-manager-sa
+          restartPolicy: Never
+
+          containers:
+            - name: backup-runner
+              # bitnami/kubectl – lightweight image with full kubectl installed
+              image: bitnami/kubectl:latest
+              imagePullPolicy: IfNotPresent
+
+              resources:
+                requests:
+                  cpu: "50m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "200m"
+                  memory: "128Mi"
+
+              # ── Backup logic ─────────────────────────────────────
+              # 1. Find the running app pod in pv-manager namespace
+              # 2. Create a timestamped backup directory on the node
+              # 3. Copy /data out of the pod
+              # 4. Compress into a .tar.gz archive
+              # 5. Exit 0 on success, non-zero on any failure
+              command:
+                - /bin/bash
+                - -euo
+                - pipefail
+                - -c
+                - |
+                  echo "[CRON-BACKUP] Starting scheduled backup – $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+                  NAMESPACE="pv-manager"
+                  POD=$(kubectl get pod -n "$NAMESPACE" \
+                        -l app=pv-demo-app \
+                        --field-selector=status.phase=Running \
+                        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+                  if [[ -z "$POD" ]]; then
+                    echo "[CRON-BACKUP][ERROR] No running pv-demo-app pod found in namespace $NAMESPACE"
+                    exit 1
+                  fi
+                  echo "[CRON-BACKUP] Target pod: $POD"
+
+                  TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+                  BACKUP_DIR="/backups"
+                  ARCHIVE="${BACKUP_DIR}/backup_${TIMESTAMP}.tar.gz"
+                  STAGING="/tmp/pv_backup_${TIMESTAMP}"
+
+                  mkdir -p "$STAGING"
+
+                  echo "[CRON-BACKUP] Copying /data from pod $POD …"
+                  kubectl cp "$NAMESPACE/$POD:/data" "$STAGING/data" --retries=3
+
+                  echo "[CRON-BACKUP] Compressing to $ARCHIVE …"
+                  tar -czf "$ARCHIVE" -C "$STAGING" data
+
+                  # Integrity check
+                  if ! tar -tzf "$ARCHIVE" > /dev/null 2>&1; then
+                    echo "[CRON-BACKUP][ERROR] Archive integrity check FAILED – removing corrupt file"
+                    rm -f "$ARCHIVE"
+                    exit 1
+                  fi
+
+                  echo "[CRON-BACKUP] Backup complete: $ARCHIVE"
+                  echo "[CRON-BACKUP] Archive size: $(du -sh $ARCHIVE | cut -f1)"
+
+                  # Cleanup staging area
+                  rm -rf "$STAGING"
+
+              # ── Mount shared backup storage ───────────────────────
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+
+          volumes:
+            - name: backup-storage
+              hostPath:
+                path: /mnt/pv-backups    # Minikube node backup storage path
+                type: DirectoryOrCreate

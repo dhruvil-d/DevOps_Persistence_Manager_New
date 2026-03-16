@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/rbac.yaml
+# ServiceAccount, ClusterRole, and ClusterRoleBinding for the
+# PV Manager. Grants minimal permissions needed to list PVs/PVCs,
+# get pod details, and exec into pods.
+# Namespace: pv-manager
+# ─────────────────────────────────────────────────────────────────
+
+# ── ServiceAccount ────────────────────────────────────────────────
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pv-manager-sa
+  namespace: pv-manager
+  labels:
+    app.kubernetes.io/name: pv-manager
+
+---
+# ── ClusterRole ───────────────────────────────────────────────────
+# ClusterRole (not Role) because PersistentVolumes are cluster-scoped
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pv-manager-cluster-role
+  labels:
+    app.kubernetes.io/name: pv-manager
+rules:
+  # PersistentVolumes are cluster-scoped
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+
+  # PersistentVolumeClaims and pods are namespaced
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Allow exec into pods (needed by pv_manager.sh backup/restore/monitor)
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+
+  # Allow reading pod logs
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Allow managing CronJobs (schedule sub-command)
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ── ClusterRoleBinding ────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pv-manager-cluster-role-binding
+  labels:
+    app.kubernetes.io/name: pv-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pv-manager-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: pv-manager-sa
+    namespace: pv-manager

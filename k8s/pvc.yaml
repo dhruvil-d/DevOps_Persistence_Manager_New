@@ -1,0 +1,21 @@
+# ─────────────────────────────────────────────────────────────────
+# k8s/pvc.yaml
+# PersistentVolumeClaim that binds to `pv-manager-pv`.
+# Namespaced inside `pv-manager`.
+# ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pv-manager-pvc
+  namespace: pv-manager
+  labels:
+    app.kubernetes.io/name: pv-manager
+spec:
+  storageClassName: standard
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # Explicitly bind to our named PV (production best practice)
+  volumeName: pv-manager-pv

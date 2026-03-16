@@ -1,0 +1,168 @@
+# =============================================================================
+# CircleCI Configuration – PV Manager Pipeline
+# =============================================================================
+# Pipeline: Pre-deploy backup → Deploy → Verify → Restore on failure
+# Requires CircleCI environment variable: KUBECONFIG_BASE64
+# =============================================================================
+
+version: 2.1
+
+# ── Reusable executors ────────────────────────────────────────────────────────
+executors:
+  kubectl-executor:
+    docker:
+      - image: bitnami/kubectl:latest
+    environment:
+      PV_NAMESPACE: pv-manager
+      PV_BACKUP_DIR: /home/circleci/project/backups
+      KUBECTL_TIMEOUT: 30s
+
+# ── Reusable commands ─────────────────────────────────────────────────────────
+commands:
+  configure-kubectl:
+    description: "Setup kubeconfig from environment variable"
+    steps:
+      - run:
+          name: Configure kubectl
+          command: |
+            mkdir -p ~/.kube
+            echo "$KUBECONFIG_BASE64" | base64 -d > ~/.kube/config
+            chmod 600 ~/.kube/config
+            kubectl cluster-info
+
+  setup-pv-manager:
+    description: "Make PV Manager executable and create directories"
+    steps:
+      - run:
+          name: Setup PV Manager
+          command: |
+            chmod +x scripts/pv_manager.sh
+            mkdir -p backups
+
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs:
+  # ── Job 1: Pre-deployment backup ─────────────────────────────────
+  pre-deploy-backup:
+    executor: kubectl-executor
+    steps:
+      - checkout
+      - configure-kubectl
+      - setup-pv-manager
+      - run:
+          name: Check PV Status
+          command: ./scripts/pv_manager.sh status
+      - run:
+          name: Create Pre-Deploy Backup
+          command: |
+            ./scripts/pv_manager.sh backup
+            BACKUP_FILE=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1)
+            echo "export BACKUP_FILE='$BACKUP_FILE'" >> $BASH_ENV
+            echo "Backup created: $BACKUP_FILE"
+      - persist_to_workspace:
+          root: .
+          paths:
+            - backups/
+      - store_artifacts:
+          path: backups/
+          destination: pv-backups
+
+  # ── Job 2: Deploy ─────────────────────────────────────────────────
+  deploy:
+    executor: kubectl-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - configure-kubectl
+      - setup-pv-manager
+      - run:
+          name: Apply Kubernetes Manifests
+          command: |
+            kubectl apply -f k8s/namespace.yaml
+            kubectl apply -f k8s/rbac.yaml
+            kubectl apply -f k8s/pv.yaml
+            kubectl apply -f k8s/pvc.yaml
+            kubectl apply -f k8s/deployment.yaml
+      - run:
+          name: Wait for Deployment Rollout
+          command: |
+            kubectl rollout status deployment/pv-demo-app \
+              -n "$PV_NAMESPACE" \
+              --timeout=120s
+      - run:
+          name: Post-Deploy Status Check
+          command: |
+            ./scripts/pv_manager.sh status
+            ./scripts/pv_manager.sh list
+
+  # ── Job 3: Monitor ────────────────────────────────────────────────
+  monitor:
+    executor: kubectl-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - configure-kubectl
+      - setup-pv-manager
+      - run:
+          name: Storage and Resource Monitoring
+          command: ./scripts/pv_manager.sh monitor
+      - run:
+          name: Enable Scheduled Backups
+          command: ./scripts/pv_manager.sh schedule on
+
+  # ── Job 4: Emergency restore ──────────────────────────────────────
+  emergency-restore:
+    executor: kubectl-executor
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - configure-kubectl
+      - setup-pv-manager
+      - run:
+          name: Restore from Pre-Deploy Backup
+          command: |
+            BACKUP_FILE=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1)
+            if [[ -z "$BACKUP_FILE" ]]; then
+              echo "No backup file found. Manual intervention required."
+              exit 1
+            fi
+            echo "Restoring from: $BACKUP_FILE"
+            ./scripts/pv_manager.sh restore "$BACKUP_FILE"
+      - run:
+          name: Verify Restoration
+          command: ./scripts/pv_manager.sh status
+
+# ── Workflow ──────────────────────────────────────────────────────────────────
+workflows:
+  pv-manager-pipeline:
+    jobs:
+      - pre-deploy-backup:
+          filters:
+            branches:
+              only: [ main, develop ]
+
+      - deploy:
+          requires:
+            - pre-deploy-backup
+          filters:
+            branches:
+              only: main
+
+      - monitor:
+          requires:
+            - deploy
+          filters:
+            branches:
+              only: main
+
+      # Emergency restore – only runs when deploy fails
+      - emergency-restore:
+          requires:
+            - pre-deploy-backup
+          filters:
+            branches:
+              only: main
+          # CircleCI: manually trigger this job or configure failure workflows
+          # via CircleCI Orbs or API-triggered pipelines for automatic rollback
